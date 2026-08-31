@@ -133,6 +133,9 @@ export async function connect(
       const handleConnection = () => {
         setConnectionState({
           isConnected: true,
+          // a new link means a new session at the far end, whether the caller
+          // asked for it or a reconnection brought it back behind their back
+          connectionEpoch: connectionState.connectionEpoch + 1,
           host,
           port,
           lastError: "",
@@ -446,13 +449,32 @@ export async function disconnect(): Promise<{ success: boolean, message: string 
 // The tricky part here is that telnet doesn't really have a clear
 // boundary for when a response is "done" - so we wait a bit to see
 // if more data arrives. After 500ms of no new data, we assume the response is complete.
-export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): Promise<{ success: boolean, response: string }> {
+/**
+ * Whether the link was replaced since the caller's previous command, marking the
+ * current one as seen.
+ *
+ * A dropped connection is re-established in the background, which keeps the
+ * transport usable but hands back a session the far end considers brand new: a
+ * login prompt, a banner, a default context. Everything the caller had
+ * established on the old link is gone, and only the caller can put it back --
+ * so it has to be told. Reported once, on the first command over the new link.
+ */
+function takeReconnectedFlag(): boolean {
+  const reconnected = connectionState.epochAtLastCommand > 0 &&
+                      connectionState.epochAtLastCommand !== connectionState.connectionEpoch;
+  setConnectionState({ epochAtLastCommand: connectionState.connectionEpoch });
+  return reconnected;
+}
+
+export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): Promise<{ success: boolean, response: string, reconnected?: boolean }> {
   return new Promise((resolve) => {
     if (!telnetClient || telnetClient.destroyed || !connectionState.isConnected) {
       const error = new NotConnectedError();
       resolve({ success: false, response: error.message });
       return;
     }
+
+    const reconnected = takeReconnectedFlag();
 
     try {
       // Sanitize the command for security
@@ -483,7 +505,8 @@ export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): P
         
         resolve({ 
           success: true, 
-          response: `${timeoutError.message}.\nPartial response:\n${buffer}` 
+          response: `${timeoutError.message}.\nPartial response:\n${buffer}`,
+          reconnected
         });
       }, timeout);
 
@@ -510,14 +533,14 @@ export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): P
           `Received response (${buffer.length} bytes):\n${buffer}`
         );
         
-        resolve({ success: true, response: formattedResponse });
+        resolve({ success: true, response: formattedResponse, reconnected });
         log(`Command complete, got ${buffer.length} bytes, continuous mode: ${continuousModeEnabled}`);
       }, RESPONSE_BUFFER_WAIT); // Wait for response to accumulate (optimized for responsiveness)
 
     } catch (error) {
       const errorMessage = formatError(error);
       log(`Error sending command: ${errorMessage}`, 'error');
-      resolve({ success: false, response: `Error sending command: ${errorMessage}` });
+      resolve({ success: false, response: `Error sending command: ${errorMessage}`, reconnected });
     }
   });
 }
@@ -584,13 +607,15 @@ export async function sendCommandWaitFor(
   pattern: string,
   timeout = WAITFOR_DEFAULT_TIMEOUT,
   pollInterval = 100
-): Promise<{ success: boolean, response: string, matched: boolean }> {
+): Promise<{ success: boolean, response: string, matched: boolean, reconnected?: boolean }> {
   return new Promise((resolve) => {
     if (!telnetClient || telnetClient.destroyed || !connectionState.isConnected) {
       const error = new NotConnectedError();
       resolve({ success: false, response: error.message, matched: false });
       return;
     }
+
+    const reconnected = takeReconnectedFlag();
 
     try {
       // Sanitize the command for security
@@ -604,7 +629,7 @@ export async function sendCommandWaitFor(
       try {
         regex = new RegExp(pattern, 'si');
       } catch (regexError) {
-        resolve({ success: false, response: `Invalid regex pattern: ${pattern}`, matched: false });
+        resolve({ success: false, response: `Invalid regex pattern: ${pattern}`, matched: false, reconnected });
         return;
       }
 
@@ -648,7 +673,7 @@ export async function sendCommandWaitFor(
             formattedResponse = `${buffer}\n\n[Waiting for your next command or instruction...]`;
           }
 
-          resolve({ success: true, response: formattedResponse, matched: true });
+          resolve({ success: true, response: formattedResponse, matched: true, reconnected });
         } else if (timedOut) {
           // Timeout reached without pattern match
           clearInterval(pollId);
@@ -663,7 +688,8 @@ export async function sendCommandWaitFor(
           resolve({
             success: true,
             response: buffer,
-            matched: false
+            matched: false,
+            reconnected
           });
         }
       }, pollInterval);
@@ -671,7 +697,7 @@ export async function sendCommandWaitFor(
     } catch (error) {
       const errorMessage = formatError(error);
       log(`Error sending command (waitFor): ${errorMessage}`, 'error');
-      resolve({ success: false, response: `Error sending command: ${errorMessage}`, matched: false });
+      resolve({ success: false, response: `Error sending command: ${errorMessage}`, matched: false, reconnected });
     }
   });
 }

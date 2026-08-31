@@ -56,3 +56,12 @@ export const TELNET = {
 
 // Default CLI port
 export const DEFAULT_CLI_PORT = 9000;
+
+// Told to the caller the first time it speaks over a link that replaced the one
+// its previous command used. The transport reports "connected" either way, so
+// without this the caller cannot tell a live session from a fresh one sitting at
+// a login prompt.
+export const RECONNECT_NOTICE =
+  "[The link was re-established since your previous command: this is a new " +
+  "session at the far end, so anything you had set up on the old one -- a " +
+  "login, a mode, a working context -- is gone.]";

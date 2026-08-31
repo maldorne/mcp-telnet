@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { log } from "../utils/logging.js";
 import { sendCommand, sendCommandWaitFor } from "../connection/index.js";
-import { DEFAULT_TIMEOUT, WAITFOR_DEFAULT_TIMEOUT, MAX_TIMEOUT } from "../config/constants.js";
+import { DEFAULT_TIMEOUT, WAITFOR_DEFAULT_TIMEOUT, MAX_TIMEOUT, RECONNECT_NOTICE } from "../config/constants.js";
 
 /**
  * Handle the wait tool
@@ -75,12 +75,14 @@ export async function handleSequenceCommandsTool(args: Record<string, unknown>) 
       if (waitFor) {
         const waitForTimeout = Math.min(defaultTimeout, WAITFOR_DEFAULT_TIMEOUT);
         const result = await sendCommandWaitFor(command, waitFor, waitForTimeout);
+        if (result.reconnected) resultTexts.push(RECONNECT_NOTICE);
         resultTexts.push(result.response);
 
         const matchStatus = result.matched ? 'matched' : 'NOT matched (timeout)';
         resultTexts.push(`\n[Command ${i + 1}/${commandsArray.length} executed, waitFor "${waitFor}" ${matchStatus}]`);
       } else {
         const result = await sendCommand(command, defaultTimeout);
+        if (result.reconnected) resultTexts.push(RECONNECT_NOTICE);
         resultTexts.push(result.response);
         resultTexts.push(`\n[Command ${i + 1}/${commandsArray.length} executed]`);
 

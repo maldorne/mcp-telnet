@@ -9,6 +9,18 @@ export interface ConnectionState {
   name: string;
   continuousEngagementActive: boolean;
   defaultDelay: number;
+
+  /**
+   * How many times a link has been established since this process started.
+   * It counts the deliberate connect and every automatic reconnection alike,
+   * so a change in it means the remote is talking over a *new* session: an
+   * interactive service will be back at whatever it shows a fresh client --
+   * a login prompt, a banner, a default context -- no matter that the
+   * transport says "connected".
+   */
+  connectionEpoch: number;
+  /** The epoch the last command was sent on, to notice a link replaced since. */
+  epochAtLastCommand: number;
   
   // SSL/TLS connection information
   /** Whether this connection is using TLS/SSL encryption */
@@ -44,6 +56,8 @@ export let connectionState: ConnectionState = {
   name: "",
   continuousEngagementActive: false,
   defaultDelay: 0,
+  connectionEpoch: 0,
+  epochAtLastCommand: 0,
   useTLS: false,
   sslInfo: undefined,
 };

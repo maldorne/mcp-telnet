@@ -45,6 +45,28 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+process.on('SIGHUP', () => {
+  log("Received SIGHUP, shutting down...");
+  process.exit(0);
+});
+
+// An MCP server speaking over stdio is owned by the client that spawned it, and
+// the client closing our stdin is how we are told it is gone. Exiting on that is
+// the only reliable shutdown: a signal sent to the process group may be taken by
+// the package runner that launched us and never reach this process, which then
+// outlives every session that ever started it -- holding its saved connections,
+// its keep-alive timers and its reconnection chains open against servers nobody
+// is talking to any more.
+process.stdin.on('end', () => {
+  log("stdin closed by the client, shutting down...");
+  process.exit(0);
+});
+
+process.stdin.on('close', () => {
+  log("stdin closed by the client, shutting down...");
+  process.exit(0);
+});
+
 // Start the application
 main().catch(error => {
   log(`Unhandled exception: ${error.message}`);

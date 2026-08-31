@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { sendCommand, sendCommandWaitFor } from "../connection/index.js";
-import { DEFAULT_TIMEOUT, WAITFOR_DEFAULT_TIMEOUT, MAX_TIMEOUT } from "../config/constants.js";
+import { DEFAULT_TIMEOUT, WAITFOR_DEFAULT_TIMEOUT, MAX_TIMEOUT, RECONNECT_NOTICE } from "../config/constants.js";
 import { log } from "../utils/logging.js";
 
 /**
@@ -33,7 +33,12 @@ export async function handleCommandTool(args: Record<string, unknown>) {
       log(`Using waitFor mode with pattern: "${waitFor}" (timeout: ${timeout}ms)`);
       const result = await sendCommandWaitFor(command, waitFor, timeout);
 
-      let responseText = result.response;
+      // A link replaced since the caller's previous command is worth saying out
+      // loud: the transport reports "connected" either way, so this is the only
+      // moment the caller can learn its session was reset under it.
+      let responseText = result.reconnected
+        ? `${RECONNECT_NOTICE}\n\n${result.response}`
+        : result.response;
 
       // Append match status metadata
       if (result.matched) {
@@ -63,13 +68,15 @@ export async function handleCommandTool(args: Record<string, unknown>) {
       log(`Wait completed (${waitAfter} seconds)`);
     }
 
+    const notice = result.reconnected ? `${RECONNECT_NOTICE}\n\n` : "";
+
     return {
       content: [
         {
           type: "text",
           text: waitAfter > 0 ?
-            `${result.response}\n\n[Waited ${waitAfter} seconds after command]` :
-            result.response
+            `${notice}${result.response}\n\n[Waited ${waitAfter} seconds after command]` :
+            `${notice}${result.response}`
         }
       ],
       isError: !result.success
