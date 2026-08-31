@@ -71,6 +71,14 @@ let telnetClient: net.Socket | null = null;
 // Timer for keep-alive mechanism
 let keepAliveTimer: NodeJS.Timeout | null = null;
 
+// Only ever one reconnection chain at a time. Three separate socket events --
+// 'error', 'timeout' and 'close' -- each schedule one, and a failed attempt
+// builds a fresh socket carrying those same three handlers, so without this
+// guard every failure spawns two or three more chains and the retries multiply
+// instead of backing off. A host that stays down then buries the process in
+// attempts within minutes.
+let reconnectionInProgress = false;
+
 // Track active reconnection timers to prevent leaks
 const activeReconnectionTimers = new Set<NodeJS.Timeout>();
 
@@ -982,6 +990,19 @@ function cleanupTimers(): void {
 
 // Attempt to reconnect if disconnected unexpectedly with exponential backoff
 async function attemptReconnect(host: string, port: number, name: string): Promise<void> {
+  if (reconnectionInProgress) {
+    return;
+  }
+  reconnectionInProgress = true;
+
+  try {
+    await runReconnect(host, port, name);
+  } finally {
+    reconnectionInProgress = false;
+  }
+}
+
+async function runReconnect(host: string, port: number, name: string): Promise<void> {
   let attempts = 0;
   
   // Find the saved connection to retrieve TLS settings
