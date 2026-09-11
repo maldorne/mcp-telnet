@@ -15,6 +15,10 @@ export const MAX_RECONNECT_ATTEMPTS = 3;
 // Initial delay before attempting to reconnect, in milliseconds
 export const RECONNECT_INITIAL_DELAY = 5000;
 
+// How long after the last command a session still counts as in use (15 min).
+// Past it a dropped link is left closed; the next command reopens it.
+export const ACTIVE_SESSION_WINDOW = 900000;
+
 // Time to wait for response buffer to accumulate, in milliseconds
 export const RESPONSE_BUFFER_WAIT = 500;
 

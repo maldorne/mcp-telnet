@@ -14,6 +14,7 @@ import {
   KEEP_ALIVE_INTERVAL,
   MAX_RECONNECT_ATTEMPTS,
   RECONNECT_INITIAL_DELAY,
+  ACTIVE_SESSION_WINDOW,
   RESPONSE_BUFFER_WAIT,
   TELNET
 } from '../config/constants.js';
@@ -78,6 +79,35 @@ let keepAliveTimer: NodeJS.Timeout | null = null;
 // instead of backing off. A host that stays down then buries the process in
 // attempts within minutes.
 let reconnectionInProgress = false;
+
+// When the caller last sent something. Reopening a link nobody is using only
+// feeds the far end's idle timeout, one new session every time it fires.
+let lastCommandAt = 0;
+
+function markActivity(): void {
+  lastCommandAt = Date.now();
+}
+
+function sessionIsInUse(): boolean {
+  return lastCommandAt > 0 && Date.now() - lastCommandAt < ACTIVE_SESSION_WINDOW;
+}
+
+// Reopen the link if it is gone and we know where it went. This is what makes
+// giving up on idle reconnection safe.
+async function ensureConnection(): Promise<boolean> {
+  if (telnetClient && !telnetClient.destroyed && connectionState.isConnected) {
+    return true;
+  }
+
+  const { host, port, name } = connectionState;
+  if (!host || !port) {
+    return false;
+  }
+
+  log(`Reopening ${host}:${port} on demand`);
+  const result = await connect(host, port, name || `${host}:${port}`);
+  return result.success;
+}
 
 // Track active reconnection timers to prevent leaks
 const activeReconnectionTimers = new Set<NodeJS.Timeout>();
@@ -290,7 +320,8 @@ export async function connect(
         stopKeepAlive();
         
         // Try to reconnect in the background if this wasn't a manual disconnect
-        if (currentHost && currentPort) {
+        // and the session is still in use
+        if (currentHost && currentPort && sessionIsInUse()) {
           const reconnectTimer = setTimeout(() => {
             activeReconnectionTimers.delete(reconnectTimer);
             attemptReconnect(currentHost, currentPort, currentName);
@@ -343,8 +374,8 @@ export async function connect(
         // Stop keep-alive
         stopKeepAlive();
         
-        // Try to reconnect in the background
-        if (currentHost && currentPort) {
+        // Try to reconnect in the background, while somebody is still working
+        if (currentHost && currentPort && sessionIsInUse()) {
           const reconnectTimer = setTimeout(() => {
             activeReconnectionTimers.delete(reconnectTimer);
             attemptReconnect(currentHost, currentPort, currentName);
@@ -377,9 +408,9 @@ export async function connect(
         // Stop keep-alive
         stopKeepAlive();
         
-        // Try to reconnect in the background if this wasn't a manual disconnect
-        // and if we were previously connected (to avoid reconnecting after manual disconnect)
-        if (wasConnected && currentHost && currentPort) {
+        // Reconnect only if this wasn't a manual disconnect and somebody is
+        // still working: an idle session is left closed.
+        if (wasConnected && currentHost && currentPort && sessionIsInUse()) {
           const reconnectTimer = setTimeout(() => {
             activeReconnectionTimers.delete(reconnectTimer);
             attemptReconnect(currentHost, currentPort, currentName);
@@ -417,7 +448,16 @@ export async function connect(
 // This sends a proper disconnect and cleans up resources.
 // It also updates the connection state and saved configs.
 export async function disconnect(): Promise<{ success: boolean, message: string }> {
-  if (!telnetClient || telnetClient.destroyed || !connectionState.isConnected) {
+  // Close the socket whenever one exists: after an unexpected drop the state
+  // says disconnected while the socket is still open at the far end.
+  if (telnetClient && !telnetClient.destroyed) {
+    cleanupTimers();
+    telnetClient.destroy();
+  }
+
+  if (!telnetClient || !connectionState.isConnected) {
+    telnetClient = null;
+    setConnectionState({ isConnected: false });
     const error = new NotConnectedError();
     return { success: false, message: error.message };
   }
@@ -432,8 +472,7 @@ export async function disconnect(): Promise<{ success: boolean, message: string 
     
     logSessionEvent(SessionEventType.DISCONNECTION, `Disconnected from ${host}:${port} (${name})`);
     endSession();
-    
-    telnetClient.destroy();
+
     telnetClient = null;
     setConnectionState({ isConnected: false });
     
@@ -475,13 +514,14 @@ function takeReconnectedFlag(): boolean {
 }
 
 export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): Promise<{ success: boolean, response: string, reconnected?: boolean }> {
-  return new Promise((resolve) => {
-    if (!telnetClient || telnetClient.destroyed || !connectionState.isConnected) {
-      const error = new NotConnectedError();
-      resolve({ success: false, response: error.message });
-      return;
-    }
+  if (!await ensureConnection()) {
+    const error = new NotConnectedError();
+    return { success: false, response: error.message };
+  }
 
+  markActivity();
+
+  return new Promise((resolve) => {
     const reconnected = takeReconnectedFlag();
 
     try {
@@ -496,7 +536,7 @@ export async function sendCommand(command: string, timeout = DEFAULT_TIMEOUT): P
       setConnectionState({ lastCommand: sanitizedCommand });
 
       // Send the sanitized command
-      telnetClient.write(`${sanitizedCommand}\r\n`);
+      telnetClient?.write(`${sanitizedCommand}\r\n`);
       log(`Sent: ${sanitizeForLogging(sanitizedCommand)}`);
       logSessionEvent(SessionEventType.COMMAND, `Sent command (${sanitizedCommand.length} bytes):\n${sanitizeForLogging(sanitizedCommand)}`);
 
@@ -616,13 +656,14 @@ export async function sendCommandWaitFor(
   timeout = WAITFOR_DEFAULT_TIMEOUT,
   pollInterval = 100
 ): Promise<{ success: boolean, response: string, matched: boolean, reconnected?: boolean }> {
-  return new Promise((resolve) => {
-    if (!telnetClient || telnetClient.destroyed || !connectionState.isConnected) {
-      const error = new NotConnectedError();
-      resolve({ success: false, response: error.message, matched: false });
-      return;
-    }
+  if (!await ensureConnection()) {
+    const error = new NotConnectedError();
+    return { success: false, response: error.message, matched: false };
+  }
 
+  markActivity();
+
+  return new Promise((resolve) => {
     const reconnected = takeReconnectedFlag();
 
     try {
@@ -646,7 +687,7 @@ export async function sendCommandWaitFor(
       setConnectionState({ lastCommand: sanitizedCommand });
 
       // Send the sanitized command
-      telnetClient.write(`${sanitizedCommand}\r\n`);
+      telnetClient?.write(`${sanitizedCommand}\r\n`);
       log(`Sent (waitFor "${pattern}"): ${sanitizeForLogging(sanitizedCommand)}`);
       logSessionEvent(SessionEventType.COMMAND, `Sent command with waitFor pattern "${pattern}" (${sanitizedCommand.length} bytes):\n${sanitizeForLogging(sanitizedCommand)}`);
 
