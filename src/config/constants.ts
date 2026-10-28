@@ -58,6 +58,14 @@ export const TELNET = {
   }
 };
 
+// Largest text a tool returns. The client drops the whole server when one
+// stdio message passes 16MB, so every reply stays far below that.
+export const MAX_TOOL_TEXT = 1024 * 1024;
+
+// Default size of a get_session_logs reply: the newest entries, enough to
+// see what just happened without reading every session ever recorded.
+export const DEFAULT_SESSION_LOG_BYTES = 64 * 1024;
+
 // Default CLI port
 export const DEFAULT_CLI_PORT = 9000;
 

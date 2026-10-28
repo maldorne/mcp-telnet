@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { MAX_TOOL_TEXT } from '../config/constants.js';
 import { handleConnectTool } from './connect.js';
 import { handleCommandTool } from './command.js';
 import { handleConnectionStatusTool, handleBufferTool } from './status.js';
@@ -20,12 +21,25 @@ import {
   handleSequenceCommandsTool
 } from './time.js';
 
+/**
+ * Keep the tail of a text past MAX_TOOL_TEXT, so no reply can grow into a
+ * message the client refuses (it disconnects the server over 16MB).
+ */
+function capText(text: string): string {
+  if (text.length <= MAX_TOOL_TEXT) {
+    return text;
+  }
+  const dropped = text.length - MAX_TOOL_TEXT;
+  return `[Output truncated: the first ${dropped} characters were dropped, ` +
+    `showing the last ${MAX_TOOL_TEXT}.]\n` + text.slice(dropped);
+}
+
 // Helper to convert handler results to proper CallToolResult type
 function toCallToolResult(result: { content: { type: string; text: string }[]; isError?: boolean }): CallToolResult {
   return {
     content: result.content.map(item => ({
       type: "text" as const,
-      text: item.text
+      text: capText(item.text)
     })),
     isError: result.isError ?? false
   };
@@ -137,12 +151,13 @@ export function registerTools(server: McpServer): void {
     "get_session_logs",
     {
       title: "Get Session Logs",
-      description: "Get telnet session logs with clear session boundaries",
+      description: "Get telnet session logs with clear session boundaries. Returns the newest entries first by file, at most maxBytes characters (default 64KB); with no filter it reads only the current session.",
       inputSchema: {
         connectionName: z.string().optional().describe("Filter logs by connection name"),
         startDate: z.string().optional().describe("Filter logs by start date (ISO format)"),
         endDate: z.string().optional().describe("Filter logs by end date (ISO format)"),
-        sessionId: z.string().optional().describe("Filter logs by specific session ID")
+        sessionId: z.string().optional().describe("Filter logs by specific session ID"),
+        maxBytes: z.number().optional().describe("Largest reply in characters (default 65536, capped at 1048576); the newest part is kept")
       }
     },
     async (args, _extra) => toCallToolResult(await handleSessionLogsTool(args))

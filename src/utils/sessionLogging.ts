@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { CONFIG_DIR } from '../config/index.js';
+import { DEFAULT_SESSION_LOG_BYTES, MAX_TOOL_TEXT } from '../config/constants.js';
 import { log } from './logging.js';
 
 /**
@@ -131,70 +132,102 @@ export function logSessionEvent(eventType: SessionEventType, details: string): v
 
 /**
  * Get session logs with filtering options
+ *
+ * Files are read newest first and reading stops once maxBytes is reached, so
+ * a log directory of any size yields a bounded reply. With no filter at all
+ * only the current session's file is read.
+ *
  * @param connectionName Optional filter by connection name
  * @param startDate Optional filter by start date (ISO format)
  * @param endDate Optional filter by end date (ISO format)
  * @param sessionId Optional filter by specific session ID
+ * @param maxBytes Optional size of the reply in characters
  * @returns Session logs matching the specified criteria
  */
 export function getSessionLogs(
-  connectionName?: string, 
-  startDate?: string, 
-  endDate?: string, 
-  sessionId?: string
+  connectionName?: string,
+  startDate?: string,
+  endDate?: string,
+  sessionId?: string,
+  maxBytes?: number
 ): string {
   ensureLogDir();
+  const limit = Math.min(Math.max(maxBytes ?? DEFAULT_SESSION_LOG_BYTES, 1024), MAX_TOOL_TEXT);
+  const unfiltered = !connectionName && !startDate && !endDate && !sessionId;
+
   // Get list of log files
-  const logFiles = fs.readdirSync(LOG_DIR)
+  let logFiles = fs.readdirSync(LOG_DIR)
     .filter(file => file.endsWith('.log'))
     .sort((a, b) => b.localeCompare(a));  // Sort with newest files first
-  
+
+  if (unfiltered && currentSessionFile) {
+    logFiles = logFiles.filter(file => path.join(LOG_DIR, file) === currentSessionFile);
+  }
+
   // Filter by connection name if provided
   const filteredByName = connectionName
     ? logFiles.filter(file => file.startsWith(connectionName.replace(/[^\w\s-]/g, '_')))
     : logFiles;
-  
+
   // Parse dates for filtering
   const startTimestamp = startDate ? new Date(startDate).getTime() : 0;
   const endTimestamp = endDate ? new Date(endDate).getTime() : Date.now();
-  
-  // Read and filter log content
-  let combinedLogs = '';
+
+  // Read and filter log content, newest file first, until the limit is reached
+  const parts: string[] = [];
+  let used = 0;
   let sessionCount = 0;
-  
+  let filesRead = 0;
+  let truncated = false;
+
   for (const file of filteredByName) {
     const filePath = path.join(LOG_DIR, file);
     const stats = fs.statSync(filePath);
     const fileTime = stats.mtime.getTime();
     const fileSizeKB = Math.round(stats.size / 1024);
-    
+
     // Skip if file is outside date range
     if (fileTime < startTimestamp || fileTime > endTimestamp) continue;
-    
-    const content = fs.readFileSync(filePath, 'utf8');
-    
+
+    let content = fs.readFileSync(filePath, 'utf8');
+
+    // If sessionId provided, only include sessions that match
+    if (sessionId && !content.includes(`Session ID: ${sessionId}`)) continue;
+
     // Count sessions in this file
     const sessionMatches = content.match(/=== SESSION START:/g);
     const sessionsInFile = sessionMatches ? sessionMatches.length : 0;
-    
-    // If sessionId provided, only include sessions that match
-    if (sessionId) {
-      if (content.includes(`Session ID: ${sessionId}`)) {
-        combinedLogs += `\n${'='.repeat(100)}\nFILE: ${file} | Size: ${fileSizeKB}KB | Created: ${new Date(fileTime).toISOString()}\n${'='.repeat(100)}\n${content}`;
-        sessionCount++;
-      }
-    } else {
-      combinedLogs += `\n${'='.repeat(100)}\nFILE: ${file} | Size: ${fileSizeKB}KB | Created: ${new Date(fileTime).toISOString()} | Sessions: ${sessionsInFile}\n${'='.repeat(100)}\n${content}`;
-      sessionCount += sessionsInFile;
+
+    const header = `\n${'='.repeat(100)}\nFILE: ${file} | Size: ${fileSizeKB}KB | Created: ${new Date(fileTime).toISOString()} | Sessions: ${sessionsInFile}\n${'='.repeat(100)}\n`;
+
+    // Keep the newest end of a file that does not fit whole
+    const room = limit - used - header.length;
+    if (room <= 0) {
+      truncated = true;
+      break;
     }
+    if (content.length > room) {
+      content = `[... ${content.length - room} older characters of this file omitted ...]\n` + content.slice(content.length - room);
+      truncated = true;
+    }
+
+    parts.push(header + content);
+    used += header.length + content.length;
+    sessionCount += sessionId ? 1 : sessionsInFile;
+    filesRead++;
+
+    if (truncated) break;
   }
-  
-  if (!combinedLogs) {
+
+  if (!parts.length) {
     return 'No session logs found matching the specified criteria.';
   }
-  
-  const summary = `Found ${sessionCount} sessions across ${filteredByName.length} log files.\n`;
-  return summary + combinedLogs;
+
+  let summary = `Found ${sessionCount} sessions across ${filesRead} log files.\n`;
+  if (truncated) {
+    summary += `[Reply limited to ${limit} characters: older entries omitted. Narrow the filters or raise maxBytes.]\n`;
+  }
+  return summary + parts.join('');
 }
 
 /**

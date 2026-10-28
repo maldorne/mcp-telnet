@@ -12,7 +12,8 @@ export async function handleSessionLogsTool(args: Record<string, unknown>) {
       connectionName: z.string().optional(),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
-      sessionId: z.string().optional()
+      sessionId: z.string().optional(),
+      maxBytes: z.number().optional()
     }).parse(args);
     
     log(`Retrieving session logs with params: ${JSON.stringify(params)}`);
@@ -22,7 +23,8 @@ export async function handleSessionLogsTool(args: Record<string, unknown>) {
       params.connectionName,
       params.startDate,
       params.endDate,
-      params.sessionId
+      params.sessionId,
+      params.maxBytes
     );
     
     return {
